@@ -10,6 +10,21 @@ set -Eeuo pipefail
 # ============================================================
 
 BACKUP_ROOT="/opt/backup/vps"
+export TZ="Asia/Jakarta"
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    cat <<'USAGE'
+Usage:
+  sudo backup-vps
+
+Creates a VPS recovery backup under /opt/backup/vps using:
+  vps-backup-YYYY-MM-DD HH.MM-FRUIT
+
+Only the 2 newest vps-backup-* directories are retained.
+USAGE
+    exit 0
+fi
+
 FRUITS=(
     "JERUK" "MANGGA" "DURIAN" "SALAK" "RAMBUTAN"
     "MANGGIS" "PISANG" "PEPAYA" "NANAS" "SEMANGKA"
@@ -49,34 +64,15 @@ echo "[1/10] Membuat manifest sistem..."
     echo "BACKUP_NAME=${BACKUP_NAME}"
     echo "BACKUP_DATE=$(date -Is)"
     echo "HOSTNAME=$(hostname)"
-    echo
-    echo "===== OS ====="
-    cat /etc/os-release
-    echo
-    echo "===== KERNEL ====="
-    uname -a
-    echo
-    echo "===== DISK ====="
-    df -hT
-    echo
-    echo "===== MEMORY ====="
-    free -h
-    echo
-    echo "===== DOCKER ====="
-    docker --version
-    docker compose version 2>/dev/null || true
-    echo
-    echo "===== CONTAINERS ====="
-    docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
-    echo
-    echo "===== VOLUMES ====="
-    docker volume ls
-    echo
-    echo "===== NETWORKS ====="
-    docker network ls
-    echo
-    echo "===== PROXY NETWORK ====="
-    docker network inspect proxy 2>/dev/null || true
+    echo; echo "===== OS ====="; cat /etc/os-release
+    echo; echo "===== KERNEL ====="; uname -a
+    echo; echo "===== DISK ====="; df -hT
+    echo; echo "===== MEMORY ====="; free -h
+    echo; echo "===== DOCKER ====="; docker --version; docker compose version 2>/dev/null || true
+    echo; echo "===== CONTAINERS ====="; docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+    echo; echo "===== VOLUMES ====="; docker volume ls
+    echo; echo "===== NETWORKS ====="; docker network ls
+    echo; echo "===== PROXY NETWORK ====="; docker network inspect proxy 2>/dev/null || true
 } > "$BACKUP_DIR/manifest/system.txt"
 
 echo "[2/10] Backup Docker Compose dan konfigurasi..."
@@ -130,17 +126,13 @@ echo "[6/10] Backup Render Service..."
 mkdir -p "$BACKUP_DIR/services/render-service"
 tar -czf "$BACKUP_DIR/services/render-service/render-service.tar.gz" --exclude='render.log' --exclude='__pycache__' -C /opt render-service
 systemctl cat render-service.service > "$BACKUP_DIR/services/render-service/render-service.service"
-if [[ -x /opt/render-service/venv/bin/pip ]]; then
-    /opt/render-service/venv/bin/pip freeze > "$BACKUP_DIR/services/render-service/requirements.freeze.txt" || true
-fi
+if [[ -x /opt/render-service/venv/bin/pip ]]; then /opt/render-service/venv/bin/pip freeze > "$BACKUP_DIR/services/render-service/requirements.freeze.txt" || true; fi
 
 echo "[7/10] Backup TTS Service..."
 mkdir -p "$BACKUP_DIR/services/tts-service"
 tar -czf "$BACKUP_DIR/services/tts-service/tts-service.tar.gz" --exclude='output' --exclude='__pycache__' -C /opt tts-service
 systemctl cat tts-service.service > "$BACKUP_DIR/services/tts-service/tts-service.service"
-if [[ -x /opt/tts-service/venv/bin/pip ]]; then
-    /opt/tts-service/venv/bin/pip freeze > "$BACKUP_DIR/services/tts-service/requirements.freeze.txt" || true
-fi
+if [[ -x /opt/tts-service/venv/bin/pip ]]; then /opt/tts-service/venv/bin/pip freeze > "$BACKUP_DIR/services/tts-service/requirements.freeze.txt" || true; fi
 
 echo "[8/10] Backup konfigurasi sistem..."
 mkdir -p "$BACKUP_DIR/system"
