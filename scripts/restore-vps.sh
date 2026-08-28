@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# VPS Recovery Kit - Restore v6
+# VPS Recovery Kit - Restore v7
 # Safe by default: --dry-run changes nothing.
-# System configuration and SSH are NOT restored automatically.
+# SSH is never restored automatically.
 
 BACKUP_DIR=""
 DRY_RUN=0
@@ -97,7 +97,7 @@ ARCHIVES=(
 )
 
 echo "============================================================"
-echo " VPS FULL RESTORE v6"
+echo " VPS FULL RESTORE v7"
 echo "============================================================"
 echo "Backup: $BACKUP_DIR"
 echo
@@ -142,6 +142,9 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 echo "============================================================"
   echo " DRY-RUN PASSED"
   echo "============================================================"
+  echo "Backup structure: OK"
+  echo "Archives: OK"
+  echo "SHA-256: OK"
   echo "No files, containers, databases, services, or firewall rules were changed."
   exit 0
 fi
@@ -178,6 +181,13 @@ wait_postgres() {
   error "PostgreSQL did not become ready."
 }
 
+stop_if_exists() {
+  local name="$1"
+  if docker container inspect "$name" >/dev/null 2>&1; then
+    docker stop "$name" >/dev/null || true
+  fi
+}
+
 echo
 echo "[1/10] Creating pre-restore safety snapshot..."
 for p in /opt/stacks /opt/npm /opt/dockge /opt/content-factory/docker /opt/render-service /opt/tts-service; do
@@ -188,11 +198,17 @@ done
 echo "  Safety snapshot: $SAFETY"
 
 echo
-echo "[2/10] Preparing Docker network..."
+echo "[2/10] Stopping affected containers..."
+for c in n8n postgres npm cloudbeaver uptime-kuma dockge portainer n8n-sandbox sandbox-api; do
+  stop_if_exists "$c"
+done
+
+echo
+echo "[3/10] Preparing Docker network..."
 docker network inspect proxy >/dev/null 2>&1 || docker network create proxy >/dev/null
 
 echo
-echo "[3/10] Restoring Docker Compose files..."
+echo "[4/10] Restoring Docker Compose files..."
 mkdir -p /opt/stacks /opt/npm /opt/dockge /opt/content-factory/docker
 cp -a "$BACKUP_DIR/docker/compose/stacks/." /opt/stacks/
 cp -a "$BACKUP_DIR/docker/compose/npm/." /opt/npm/
@@ -200,7 +216,7 @@ cp -a "$BACKUP_DIR/docker/compose/dockge/." /opt/dockge/
 cp -a "$BACKUP_DIR/docker/compose/content-factory-docker/." /opt/content-factory/docker/
 
 echo
-echo "[4/10] Restoring Docker data..."
+echo "[5/10] Restoring Docker data and volumes..."
 restore_tar "$BACKUP_DIR/docker/data/n8n-data.tar.gz" /opt/stacks/n8n
 restore_tar "$BACKUP_DIR/docker/data/cloudbeaver-data.tar.gz" /opt/stacks/cloudbeaver
 restore_tar "$BACKUP_DIR/docker/data/uptime-kuma-data.tar.gz" /opt/stacks/uptime-kuma
@@ -208,8 +224,6 @@ restore_tar "$BACKUP_DIR/docker/data/npm-data.tar.gz" /opt/npm
 restore_tar "$BACKUP_DIR/docker/data/npm-letsencrypt.tar.gz" /opt/npm
 restore_tar "$BACKUP_DIR/docker/data/dockge-data.tar.gz" /opt/dockge
 
-echo
-echo "[5/10] Restoring Docker volumes..."
 docker volume inspect portainer_portainer_data >/dev/null 2>&1 || docker volume create portainer_portainer_data >/dev/null
 docker run --rm -v portainer_portainer_data:/target -v "$BACKUP_DIR/docker/volumes":/backup:ro alpine sh -c 'tar xzf /backup/portainer_portainer_data.tar.gz -C /target'
 docker volume inspect n8n-sandbox_sandbox-tls >/dev/null 2>&1 || docker volume create n8n-sandbox_sandbox-tls >/dev/null
@@ -219,14 +233,21 @@ echo
 echo "[6/10] Restoring PostgreSQL..."
 compose_up /opt/stacks/postgres/compose.yaml
 wait_postgres
+
+# Restore roles/globals. Existing-role conflicts are tolerated; database restore below is authoritative.
 docker exec -i postgres psql -U admin -d postgres < "$BACKUP_DIR/postgres/globals.sql" || true
+
+# Fresh VPS may not have n8n_konten. Create it before pg_restore.
+if ! docker exec postgres psql -U admin -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='n8n_konten'" | grep -q 1; then
+  docker exec postgres psql -U admin -d postgres -c 'CREATE DATABASE n8n_konten OWNER n8n;'
+fi
+
 docker cp "$BACKUP_DIR/postgres/n8n_konten.dump" postgres:/tmp/n8n_konten.dump
 docker exec postgres pg_restore -U admin -d n8n_konten --clean --if-exists --no-owner --exit-on-error /tmp/n8n_konten.dump
 docker exec postgres rm -f /tmp/n8n_konten.dump
 
 echo
 echo "[7/10] Restoring Render and TTS services..."
-mkdir -p /opt/render-service /opt/tts-service
 restore_tar "$BACKUP_DIR/services/render-service/render-service.tar.gz" /opt
 restore_tar "$BACKUP_DIR/services/tts-service/tts-service.tar.gz" /opt
 cp "$BACKUP_DIR/services/render-service/render-service.service" /etc/systemd/system/render-service.service
@@ -280,4 +301,3 @@ echo " RESTORE FINISHED"
 echo "============================================================"
 echo "Pre-restore safety snapshot: $SAFETY"
 echo "Verify n8n, NPM/SSL, Render, TTS, and SSH before closing the session."
-echo
