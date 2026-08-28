@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# VPS Recovery Kit - Restore v7
+# VPS Recovery Kit - Restore v8
 # Safe by default: --dry-run changes nothing.
 # SSH is never restored automatically.
 
@@ -97,7 +97,7 @@ ARCHIVES=(
 )
 
 echo "============================================================"
-echo " VPS FULL RESTORE v7"
+echo " VPS FULL RESTORE v8"
 echo "============================================================"
 echo "Backup: $BACKUP_DIR"
 echo
@@ -139,7 +139,7 @@ fi
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo
-echo "============================================================"
+  echo "============================================================"
   echo " DRY-RUN PASSED"
   echo "============================================================"
   echo "Backup structure: OK"
@@ -151,7 +151,7 @@ fi
 
 if [[ "$YES" -ne 1 ]]; then
   echo
-echo "============================================================"
+  echo "============================================================"
   echo " WARNING: LIVE RESTORE"
   echo "============================================================"
   echo "This operation will modify this VPS."
@@ -188,20 +188,39 @@ stop_if_exists() {
   fi
 }
 
-echo
-echo "[1/10] Creating pre-restore safety snapshot..."
-for p in /opt/stacks /opt/npm /opt/dockge /opt/content-factory/docker /opt/render-service /opt/tts-service; do
+snapshot_path() {
+  local p="$1"
+  local base
+  base="$(basename "$p")"
   if [[ -e "$p" ]]; then
-    tar -czf "$SAFETY/$(basename "$p").tar.gz" "$p"
+    tar -czf "$SAFETY/$base.tar.gz" "$p"
   fi
-done
-echo "  Safety snapshot: $SAFETY"
+}
+
+cleanup_on_error() {
+  echo
+  echo "============================================================" >&2
+  echo " RESTORE FAILED" >&2
+  echo "============================================================" >&2
+  echo "Pre-restore safety snapshot: $SAFETY" >&2
+  echo "Affected services were not automatically rolled back." >&2
+  echo "Inspect the error above and the safety snapshot before retrying." >&2
+}
+trap cleanup_on_error ERR
 
 echo
-echo "[2/10] Stopping affected containers..."
+echo "[1/10] Stopping affected containers and services..."
 for c in n8n postgres npm cloudbeaver uptime-kuma dockge portainer n8n-sandbox sandbox-api; do
   stop_if_exists "$c"
 done
+systemctl stop render-service.service tts-service.service 2>/dev/null || true
+
+echo
+echo "[2/10] Creating pre-restore safety snapshot..."
+for p in /opt/stacks /opt/npm /opt/dockge /opt/content-factory/docker /opt/render-service /opt/tts-service; do
+  snapshot_path "$p"
+done
+echo "  Safety snapshot: $SAFETY"
 
 echo
 echo "[3/10] Preparing Docker network..."
@@ -234,11 +253,24 @@ echo "[6/10] Restoring PostgreSQL..."
 compose_up /opt/stacks/postgres/compose.yaml
 wait_postgres
 
-# Restore roles/globals. Existing-role conflicts are tolerated; database restore below is authoritative.
-docker exec -i postgres psql -U admin -d postgres < "$BACKUP_DIR/postgres/globals.sql" || true
+# globals.sql contains roles and global objects. It may report benign conflicts
+# when restoring onto an already initialized PostgreSQL cluster, but failures
+# other than known duplicate-role/database cases must stop the restore.
+GLOBALS_LOG="$SAFETY/globals-restore.log"
+if ! docker exec -i postgres psql -v ON_ERROR_STOP=1 -U admin -d postgres < "$BACKUP_DIR/postgres/globals.sql" >"$GLOBALS_LOG" 2>&1; then
+  if ! grep -Eq 'already exists|role .* already exists|database .* already exists' "$GLOBALS_LOG"; then
+    cat "$GLOBALS_LOG" >&2
+    error "PostgreSQL globals restore failed."
+  fi
+fi
 
-# Fresh VPS may not have n8n_konten. Create it before pg_restore.
-if ! docker exec postgres psql -U admin -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='n8n_konten'" | grep -q 1; then
+if ! docker exec postgres psql -U admin -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='n8n'" | grep -q 1; then
+  error "PostgreSQL role n8n was not restored."
+fi
+
+if docker exec postgres psql -U admin -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='n8n_konten'" | grep -q 1; then
+  docker exec postgres psql -U admin -d postgres -c 'ALTER DATABASE n8n_konten OWNER TO n8n;'
+else
   docker exec postgres psql -U admin -d postgres -c 'CREATE DATABASE n8n_konten OWNER n8n;'
 fi
 
@@ -290,10 +322,19 @@ echo "[10/10] Running health checks..."
 sleep 5
 docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
 echo
-if docker exec postgres pg_isready -U admin -d postgres >/dev/null 2>&1; then echo "PostgreSQL: OK"; else echo "PostgreSQL: FAILED"; fi
-if curl -fsS http://127.0.0.1:5678/healthz >/dev/null 2>&1; then echo "n8n /healthz: OK"; else echo "n8n /healthz: NOT RESPONDING"; fi
-if curl -fsS http://127.0.0.1:5006/health >/dev/null 2>&1; then echo "Render /health: OK"; else echo "Render /health: FAILED"; fi
-if systemctl is-active --quiet tts-service.service; then echo "TTS service: OK"; else echo "TTS service: FAILED"; fi
+
+docker exec postgres pg_isready -U admin -d postgres >/dev/null 2>&1 || error "PostgreSQL health check failed."
+docker exec postgres psql -U admin -d n8n_konten -tAc "SELECT 1 FROM workflow_entity LIMIT 1" >/dev/null || error "n8n_konten database health check failed."
+docker exec n8n wget -qO- http://127.0.0.1:5678/healthz >/dev/null 2>&1 || error "n8n /healthz health check failed."
+curl -fsS http://127.0.0.1:5006/health >/dev/null 2>&1 || error "Render /health health check failed."
+systemctl is-active --quiet tts-service.service || error "TTS service health check failed."
+echo "PostgreSQL: OK"
+echo "n8n database: OK"
+echo "n8n /healthz: OK"
+echo "Render /health: OK"
+echo "TTS service: OK"
+
+trap - ERR
 
 echo
 echo "============================================================"
