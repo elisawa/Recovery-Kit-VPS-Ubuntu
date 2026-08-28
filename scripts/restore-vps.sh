@@ -2,228 +2,121 @@
 set -Eeuo pipefail
 
 # ============================================================
-# VPS FULL RESTORE
-# Restores the Content Factory / n8n / Render / TTS stack
-# from a backup created by backup-vps.sh.
-#
-# IMPORTANT:
-# - Run on a fresh/rebuilt VPS as root.
-# - The backup directory must be available locally.
-# - This script intentionally does NOT overwrite /etc/ssh automatically.
-# - Docker must be installed before running this script.
+# VPS FULL RESTORE v2
+# Restore a backup created by backup-vps.sh.
+# Run on a rebuilt VPS. Docker must already be installed.
+# SSH is NEVER overwritten automatically.
 # ============================================================
 
 BACKUP_DIR=""
-ASSUME_YES=0
-SKIP_SYSTEM_CONFIG=0
+YES=0
+SKIP_SYSTEM=0
 
 usage() {
-    cat <<'EOF'
+  cat <<'EOF'
 Usage:
   sudo ./restore-vps.sh --backup-dir /path/to/backup
   sudo ./restore-vps.sh --backup-dir /path/to/backup --yes
 
 Options:
-  --backup-dir PATH   Backup directory created by backup-vps.sh (required)
-  --yes               Skip confirmation prompts
-  --skip-system       Do not restore UFW/Fail2Ban/Docker/systemd config archives
-  -h, --help          Show this help
+  --backup-dir PATH   Recovery backup directory (required)
+  --yes               Skip confirmation
+  --skip-system       Skip Docker/UFW/Fail2Ban/cron/systemd restore
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --backup-dir)
-            BACKUP_DIR="${2:-}"
-            shift 2
-            ;;
-        --yes)
-            ASSUME_YES=1
-            shift
-            ;;
-        --skip-system)
-            SKIP_SYSTEM_CONFIG=1
-            shift
-            ;;
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        *)
-            echo "ERROR: unknown option: $1"
-            usage
-            exit 1
-            ;;
-    esac
+  case "$1" in
+    --backup-dir) BACKUP_DIR="${2:-}"; shift 2 ;;
+    --yes) YES=1; shift ;;
+    --skip-system) SKIP_SYSTEM=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "ERROR: unknown option: $1"; usage; exit 1 ;;
+  esac
 done
 
-if [[ $EUID -ne 0 ]]; then
-    echo "ERROR: run this script with sudo/root."
-    exit 1
-fi
-
-if [[ -z "$BACKUP_DIR" ]]; then
-    echo "ERROR: --backup-dir is required."
-    usage
-    exit 1
-fi
-
+[[ $EUID -eq 0 ]] || { echo "ERROR: run as root/sudo."; exit 1; }
+[[ -n "$BACKUP_DIR" ]] || { echo "ERROR: --backup-dir is required."; exit 1; }
 BACKUP_DIR="$(realpath "$BACKUP_DIR")"
-CHECKSUM_FILE="$BACKUP_DIR/manifest/checksums.sha256"
+[[ -d "$BACKUP_DIR" ]] || { echo "ERROR: backup not found: $BACKUP_DIR"; exit 1; }
+[[ -f "$BACKUP_DIR/manifest/checksums.sha256" ]] || { echo "ERROR: checksum file missing."; exit 1; }
 
-if [[ ! -d "$BACKUP_DIR" ]]; then
-    echo "ERROR: backup directory not found: $BACKUP_DIR"
-    exit 1
-fi
-
-if [[ ! -f "$CHECKSUM_FILE" ]]; then
-    echo "ERROR: checksum file not found: $CHECKSUM_FILE"
-    exit 1
-fi
-
-# ------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------
-
+need_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: required command missing: $1"; exit 1; }; }
+need_file() { [[ -f "$1" ]] || { echo "ERROR: missing file: $1"; exit 1; }; }
+need_dir() { [[ -d "$1" ]] || { echo "ERROR: missing directory: $1"; exit 1; }; }
 confirm() {
-    local question="$1"
-    if [[ "$ASSUME_YES" -eq 1 ]]; then
-        return 0
-    fi
-
-    echo
-    read -r -p "$question [yes/NO]: " answer
-    [[ "$answer" == "yes" ]]
-}
-
-require_file() {
-    local f="$1"
-    [[ -f "$f" ]] || {
-        echo "ERROR: required file missing: $f"
-        exit 1
-    }
-}
-
-require_dir() {
-    local d="$1"
-    [[ -d "$d" ]] || {
-        echo "ERROR: required directory missing: $d"
-        exit 1
-    }
+  [[ "$YES" -eq 1 ]] && return 0
+  read -r -p "$1 [yes/NO]: " a
+  [[ "$a" == yes ]]
 }
 
 restore_tar() {
-    local archive="$1"
-    local destination="$2"
-    require_file "$archive"
-    mkdir -p "$destination"
-    tar -xzf "$archive" -C "$destination"
+  local archive="$1" dest="$2"
+  need_file "$archive"
+  mkdir -p "$dest"
+  tar -xzf "$archive" -C "$dest"
 }
 
 compose_up() {
-    local compose="$1"
-    if [[ -f "$compose" ]]; then
-        echo "  docker compose up: $compose"
-        docker compose -f "$compose" up -d
-    else
-        echo "  WARNING: compose not found: $compose"
-    fi
+  local f="$1"
+  [[ -f "$f" ]] || { echo "ERROR: compose file missing: $f"; exit 1; }
+  docker compose -f "$f" up -d
 }
 
-wait_for_postgres() {
-    echo "  Waiting for PostgreSQL..."
-    for i in {1..60}; do
-        if docker exec postgres pg_isready -U admin -d postgres >/dev/null 2>&1; then
-            echo "  PostgreSQL is ready."
-            return 0
-        fi
-        sleep 2
-    done
-    echo "ERROR: PostgreSQL did not become ready."
-    exit 1
+wait_pg() {
+  for i in {1..60}; do
+    if docker exec postgres pg_isready -U admin -d postgres >/dev/null 2>&1; then return 0; fi
+    sleep 2
+  done
+  echo "ERROR: PostgreSQL did not become ready."; exit 1
 }
 
-# ------------------------------------------------------------
-# Safety information
-# ------------------------------------------------------------
-
 echo "============================================================"
-echo " VPS FULL RESTORE"
+echo " VPS FULL RESTORE v2"
 echo "============================================================"
-echo "Backup : $BACKUP_DIR"
+echo "Backup: $BACKUP_DIR"
 echo
 
-if [[ -f "$BACKUP_DIR/manifest/README.txt" ]]; then
-    cat "$BACKUP_DIR/manifest/README.txt"
+need_cmd docker
+need_cmd tar
+need_cmd sha256sum
+need_cmd systemctl
+
+if [[ ! -f /opt/stacks/n8n/compose.yaml ]]; then
+  echo "NOTE: this looks like a fresh VPS."
 fi
 
-echo
-echo "WARNING: this operation restores system/application data."
-echo "It is intended for a rebuilt/fresh VPS."
-echo
-
-if ! confirm "Continue with RESTORE?"; then
-    echo "Restore cancelled."
-    exit 0
-fi
+echo "WARNING: this restores application data onto this VPS."
+echo "Use it on a rebuilt/fresh VPS whenever possible."
+confirm "Continue with RESTORE?" || { echo "Cancelled."; exit 0; }
 
 # ------------------------------------------------------------
-# 1. Verify backup integrity
+# 1. Verify every backup file before changing anything.
 # ------------------------------------------------------------
-
-echo
- echo "[1/12] Verifying backup checksum..."
+echo "[1/11] Verifying backup integrity..."
 (
-    cd "$BACKUP_DIR"
-    sha256sum -c manifest/checksums.sha256
+  cd "$BACKUP_DIR"
+  sha256sum -c manifest/checksums.sha256
 )
-
 echo "Checksum verification: OK"
 
 # ------------------------------------------------------------
-# 2. Basic packages / directories
+# 2. Restore stack definitions/configuration.
+# Data directories are intentionally excluded from this copy and
+# restored from their dedicated archives below.
 # ------------------------------------------------------------
+echo "[2/11] Restoring Compose/configuration..."
+mkdir -p /opt/stacks /opt/npm /opt/dockge /opt/content-factory/docker /opt/scripts
 
-echo
- echo "[2/12] Preparing filesystem..."
-
-mkdir -p /opt/stacks
-mkdir -p /opt/npm
-mkdir -p /opt/dockge
-mkdir -p /opt/content-factory/docker
-mkdir -p /opt/backup
-mkdir -p /opt/scripts
-
-# ------------------------------------------------------------
-# 3. Restore Compose/configuration files
-# ------------------------------------------------------------
-
-echo
- echo "[3/12] Restoring Docker Compose/configuration..."
-
-if [[ -d "$BACKUP_DIR/docker/compose/stacks" ]]; then
-    cp -a "$BACKUP_DIR/docker/compose/stacks/." /opt/stacks/
-fi
-
-if [[ -d "$BACKUP_DIR/docker/compose/npm" ]]; then
-    cp -a "$BACKUP_DIR/docker/compose/npm/." /opt/npm/
-fi
-
-if [[ -d "$BACKUP_DIR/docker/compose/dockge" ]]; then
-    cp -a "$BACKUP_DIR/docker/compose/dockge/." /opt/dockge/
-fi
-
-if [[ -d "$BACKUP_DIR/docker/compose/content-factory-docker" ]]; then
-    cp -a "$BACKUP_DIR/docker/compose/content-factory-docker/." /opt/content-factory/docker/
-fi
+cp -a "$BACKUP_DIR/docker/compose/stacks/." /opt/stacks/
+cp -a "$BACKUP_DIR/docker/compose/npm/." /opt/npm/
+cp -a "$BACKUP_DIR/docker/compose/dockge/." /opt/dockge/
+cp -a "$BACKUP_DIR/docker/compose/content-factory-docker/." /opt/content-factory/docker/
 
 # ------------------------------------------------------------
-# 4. Restore Docker application data
+# 3. Restore application data.
 # ------------------------------------------------------------
-
-echo
- echo "[4/12] Restoring Docker application data..."
-
+echo "[3/11] Restoring Docker application data..."
 restore_tar "$BACKUP_DIR/docker/data/n8n-data.tar.gz" /opt/stacks/n8n
 restore_tar "$BACKUP_DIR/docker/data/cloudbeaver-data.tar.gz" /opt/stacks/cloudbeaver
 restore_tar "$BACKUP_DIR/docker/data/uptime-kuma-data.tar.gz" /opt/stacks/uptime-kuma
@@ -232,265 +125,162 @@ restore_tar "$BACKUP_DIR/docker/data/npm-letsencrypt.tar.gz" /opt/npm
 restore_tar "$BACKUP_DIR/docker/data/dockge-data.tar.gz" /opt/dockge
 
 # ------------------------------------------------------------
-# 5. Restore Docker named volumes
+# 4. Restore named Docker volumes.
 # ------------------------------------------------------------
-
-echo
- echo "[5/12] Restoring Docker named volumes..."
-
-# Docker volumes must exist before data is imported.
+echo "[4/11] Restoring Docker volumes..."
 docker volume create portainer_portainer_data >/dev/null
 
 docker run --rm \
-    -v portainer_portainer_data:/target \
-    -v "$BACKUP_DIR/docker/volumes":/backup:ro \
-    alpine sh -c 'tar xzf /backup/portainer_portainer_data.tar.gz -C /target'
+  -v portainer_portainer_data:/target \
+  -v "$BACKUP_DIR/docker/volumes":/backup:ro \
+  alpine sh -c 'tar xzf /backup/portainer_portainer_data.tar.gz -C /target'
 
 if [[ -f "$BACKUP_DIR/docker/volumes/n8n-sandbox_sandbox-tls.tar.gz" ]]; then
-    docker volume create n8n-sandbox_sandbox-tls >/dev/null
-    docker run --rm \
-        -v n8n-sandbox_sandbox-tls:/target \
-        -v "$BACKUP_DIR/docker/volumes":/backup:ro \
-        alpine sh -c 'tar xzf /backup/n8n-sandbox_sandbox-tls.tar.gz -C /target'
+  docker volume create n8n-sandbox_sandbox-tls >/dev/null
+  docker run --rm \
+    -v n8n-sandbox_sandbox-tls:/target \
+    -v "$BACKUP_DIR/docker/volumes":/backup:ro \
+    alpine sh -c 'tar xzf /backup/n8n-sandbox_sandbox-tls.tar.gz -C /target'
 fi
 
 # ------------------------------------------------------------
-# 6. Create Docker network
+# 5. Prepare proxy network.
 # ------------------------------------------------------------
+echo "[5/11] Preparing Docker network..."
+docker network inspect proxy >/dev/null 2>&1 || docker network create proxy >/dev/null
 
-echo
- echo "[6/12] Preparing Docker network..."
+# ------------------------------------------------------------
+# 6. PostgreSQL first.
+# ------------------------------------------------------------
+echo "[6/11] Starting PostgreSQL..."
+compose_up /opt/stacks/postgres/compose.yaml
+wait_pg
 
-if ! docker network inspect proxy >/dev/null 2>&1; then
-    docker network create proxy
+need_file "$BACKUP_DIR/postgres/globals.sql"
+need_file "$BACKUP_DIR/postgres/n8n_konten.dump"
+need_file "$BACKUP_DIR/postgres/postgres.dump"
+
+# Restore roles. Existing-role errors are acceptable, but other
+# SQL errors are surfaced so a broken globals restore is visible.
+docker exec -i postgres psql -U admin -d postgres < "$BACKUP_DIR/postgres/globals.sql" || true
+
+# Ensure the n8n role exists and database exists.
+if ! docker exec postgres psql -U admin -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='n8n'" | grep -q 1; then
+  echo "ERROR: PostgreSQL role n8n was not restored."; exit 1
+fi
+if ! docker exec postgres psql -U admin -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='n8n_konten'" | grep -q 1; then
+  docker exec postgres psql -U admin -d postgres -c 'CREATE DATABASE n8n_konten OWNER n8n;'
 fi
 
-# ------------------------------------------------------------
-# 7. Start PostgreSQL only
-# ------------------------------------------------------------
-
-echo
- echo "[7/12] Starting PostgreSQL..."
-
-require_file /opt/stacks/postgres/compose.yaml
-
-docker compose -f /opt/stacks/postgres/compose.yaml up -d postgres
-wait_for_postgres
-
-# ------------------------------------------------------------
-# 8. Restore PostgreSQL roles + databases
-# ------------------------------------------------------------
-
-echo
- echo "[8/12] Restoring PostgreSQL..."
-
-require_file "$BACKUP_DIR/postgres/globals.sql"
-require_file "$BACKUP_DIR/postgres/n8n_konten.dump"
-require_file "$BACKUP_DIR/postgres/postgres.dump"
-
-# Restore roles first. Ignore errors for roles that already exist.
-docker exec -i postgres psql -U admin -d postgres \
-    < "$BACKUP_DIR/postgres/globals.sql" \
-    || true
-
-# Ensure n8n_konten exists.
-if ! docker exec postgres psql -U admin -d postgres -tAc \
-    "SELECT 1 FROM pg_database WHERE datname='n8n_konten'" | grep -q 1; then
-    docker exec postgres psql -U admin -d postgres \
-        -c 'CREATE DATABASE n8n_konten OWNER n8n;'
-fi
-
-# Restore the n8n database.
 docker cp "$BACKUP_DIR/postgres/n8n_konten.dump" postgres:/tmp/n8n_konten.dump
-
-docker exec postgres pg_restore \
-    -U admin \
-    -d n8n_konten \
-    --clean \
-    --if-exists \
-    --no-owner \
-    /tmp/n8n_konten.dump
-
+docker exec postgres pg_restore -U admin -d n8n_konten --clean --if-exists --no-owner /tmp/n8n_konten.dump
 docker exec postgres rm -f /tmp/n8n_konten.dump
 
-# Restore the postgres database contents.
 docker cp "$BACKUP_DIR/postgres/postgres.dump" postgres:/tmp/postgres.dump
-
-docker exec postgres pg_restore \
-    -U admin \
-    -d postgres \
-    --clean \
-    --if-exists \
-    --no-owner \
-    /tmp/postgres.dump \
-    || true
-
+docker exec postgres pg_restore -U admin -d postgres --clean --if-exists --no-owner /tmp/postgres.dump || true
 docker exec postgres rm -f /tmp/postgres.dump
 
 # ------------------------------------------------------------
-# 9. Start application stacks
+# 7. Restore Render/TTS source and service definitions.
 # ------------------------------------------------------------
+echo "[7/11] Restoring Render/TTS services..."
+rm -rf /opt/render-service /opt/tts-service
+restore_tar "$BACKUP_DIR/services/render-service/render-service.tar.gz" /opt
+restore_tar "$BACKUP_DIR/services/tts-service/tts-service.tar.gz" /opt
 
-echo
- echo "[9/12] Starting Docker application stacks..."
+cp "$BACKUP_DIR/services/render-service/render-service.service" /etc/systemd/system/render-service.service
+cp "$BACKUP_DIR/services/tts-service/tts-service.service" /etc/systemd/system/tts-service.service
 
-# NPM first because it provides reverse proxy/SSL.
-compose_up /opt/npm/compose.yaml
-
-# n8n sandbox before n8n.
-compose_up /opt/stacks/n8n-sandbox/compose.yaml
-
-# n8n itself.
-compose_up /opt/stacks/n8n/compose.yaml
-
-# Remaining applications.
-compose_up /opt/stacks/cloudbeaver/compose.yaml
-compose_up /opt/stacks/uptime-kuma/compose.yaml
-compose_up /opt/dockge/compose.yaml
-
-# Portainer compose lives in the content-factory tree.
-if [[ -f /opt/content-factory/docker/portainer/docker-compose.yml ]]; then
-    compose_up /opt/content-factory/docker/portainer/docker-compose.yml
-fi
-
-# ------------------------------------------------------------
-# 10. Restore Render + TTS services
-# ------------------------------------------------------------
-
-echo
- echo "[10/12] Restoring Render/TTS services..."
-
-if [[ -f "$BACKUP_DIR/services/render-service/render-service.tar.gz" ]]; then
-    rm -rf /opt/render-service
-    mkdir -p /opt
-    tar -xzf "$BACKUP_DIR/services/render-service/render-service.tar.gz" -C /opt
-fi
-
-if [[ -f "$BACKUP_DIR/services/tts-service/tts-service.tar.gz" ]]; then
-    rm -rf /opt/tts-service
-    mkdir -p /opt
-    tar -xzf "$BACKUP_DIR/services/tts-service/tts-service.tar.gz" -C /opt
-fi
-
-if [[ -f "$BACKUP_DIR/services/render-service/render-service.service" ]]; then
-    cp "$BACKUP_DIR/services/render-service/render-service.service" \
-        /etc/systemd/system/render-service.service
-fi
-
-if [[ -f "$BACKUP_DIR/services/tts-service/tts-service.service" ]]; then
-    cp "$BACKUP_DIR/services/tts-service/tts-service.service" \
-        /etc/systemd/system/tts-service.service
-fi
-
-# Reinstall Python dependencies if pip exists.
+# Existing venvs are restored from the backup. Reinstalling packages
+# is attempted only when the venv's pip exists; failures are reported
+# but do not destroy the restored venv.
 if [[ -x /opt/render-service/venv/bin/pip && -f "$BACKUP_DIR/services/render-service/requirements.freeze.txt" ]]; then
-    /opt/render-service/venv/bin/pip install -r \
-        "$BACKUP_DIR/services/render-service/requirements.freeze.txt" || true
+  /opt/render-service/venv/bin/pip install -r "$BACKUP_DIR/services/render-service/requirements.freeze.txt" || echo "WARNING: Render pip dependency refresh failed."
 fi
-
 if [[ -x /opt/tts-service/venv/bin/pip && -f "$BACKUP_DIR/services/tts-service/requirements.freeze.txt" ]]; then
-    /opt/tts-service/venv/bin/pip install -r \
-        "$BACKUP_DIR/services/tts-service/requirements.freeze.txt" || true
+  /opt/tts-service/venv/bin/pip install -r "$BACKUP_DIR/services/tts-service/requirements.freeze.txt" || echo "WARNING: TTS pip dependency refresh failed."
 fi
 
-# Correct ownership for application services.
 if id zkonten >/dev/null 2>&1; then
-    chown -R zkonten:zkonten /opt/render-service /opt/tts-service 2>/dev/null || true
+  chown -R zkonten:zkonten /opt/render-service /opt/tts-service
+fi
+
+# ------------------------------------------------------------
+# 8. Optional system configuration.
+# Never overwrite SSH automatically.
+# ------------------------------------------------------------
+echo "[8/11] System configuration..."
+if [[ "$SKIP_SYSTEM" -eq 0 ]]; then
+  tar -xzf "$BACKUP_DIR/system/docker-config.tar.gz" -C /etc
+  tar -xzf "$BACKUP_DIR/system/ufw.tar.gz" -C /etc
+  tar -xzf "$BACKUP_DIR/system/fail2ban.tar.gz" -C /etc
+  tar -xzf "$BACKUP_DIR/system/cron.tar.gz" -C /etc
+  tar -xzf "$BACKUP_DIR/system/systemd.tar.gz" -C /etc
+  echo "SSH config intentionally NOT restored."
+else
+  echo "System configuration skipped."
 fi
 
 systemctl daemon-reload
+
+# ------------------------------------------------------------
+# 9. Start application stacks.
+# ------------------------------------------------------------
+echo "[9/11] Starting application stacks..."
+compose_up /opt/npm/compose.yaml
+compose_up /opt/stacks/n8n-sandbox/compose.yaml
+compose_up /opt/stacks/n8n/compose.yaml
+compose_up /opt/stacks/cloudbeaver/compose.yaml
+compose_up /opt/stacks/uptime-kuma/compose.yaml
+compose_up /opt/dockge/compose.yaml
+compose_up /opt/content-factory/docker/portainer/docker-compose.yml
+
+# ------------------------------------------------------------
+# 10. Start native services.
+# ------------------------------------------------------------
+echo "[10/11] Starting Render/TTS services..."
 systemctl enable render-service.service tts-service.service
 systemctl restart render-service.service
-auto_restart_tts=1
 systemctl restart tts-service.service
 
 # ------------------------------------------------------------
-# 11. Optional system configuration
+# 11. Health report.
 # ------------------------------------------------------------
-
-echo
- echo "[11/12] Restoring system configuration..."
-
-if [[ "$SKIP_SYSTEM_CONFIG" -eq 0 ]]; then
-    # Docker daemon configuration.
-    if [[ -f "$BACKUP_DIR/system/docker-config.tar.gz" ]]; then
-        tar -xzf "$BACKUP_DIR/system/docker-config.tar.gz" -C /etc
-    fi
-
-    # Firewall configuration is restored only if UFW exists.
-    if [[ -f "$BACKUP_DIR/system/ufw.tar.gz" && -d /etc/ufw ]]; then
-        tar -xzf "$BACKUP_DIR/system/ufw.tar.gz" -C /etc
-    fi
-
-    # Fail2Ban configuration.
-    if [[ -f "$BACKUP_DIR/system/fail2ban.tar.gz" ]]; then
-        tar -xzf "$BACKUP_DIR/system/fail2ban.tar.gz" -C /etc
-    fi
-
-    # Cron configuration.
-    if [[ -f "$BACKUP_DIR/system/cron.tar.gz" ]]; then
-        tar -xzf "$BACKUP_DIR/system/cron.tar.gz" -C /etc
-    fi
-
-    systemctl daemon-reload
-
-    # IMPORTANT: SSH is intentionally NOT restored automatically.
-    # A changed sshd_config can lock the administrator out of a new VPS.
-    echo "  SSH configuration NOT restored automatically (safety)."
-else
-    echo "  System config restore skipped by --skip-system."
-fi
-
-# ------------------------------------------------------------
-# 12. Final health check
-# ------------------------------------------------------------
-
-echo
- echo "[12/12] Final health check..."
-
+echo "[11/11] Health check..."
 sleep 5
 
 echo
-echo "===== DOCKER CONTAINERS ====="
+ echo "===== CONTAINERS ====="
 docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
 
 echo
-
-echo "===== DOCKER NETWORK ====="
+ echo "===== PROXY NETWORK ====="
 docker network inspect proxy --format '{{range .Containers}}{{println .Name}}{{end}}' 2>/dev/null || true
 
 echo
+ echo "===== POSTGRES ====="
+docker exec postgres psql -U admin -d postgres -c '\l'
 
-echo "===== SERVICES ====="
-systemctl --no-pager --full status render-service.service --lines=5 || true
+echo
+ echo "===== RENDER ====="
+if curl -fsS http://127.0.0.1:5006/health >/dev/null 2>&1; then echo "Render /health: OK"; else echo "Render /health: FAILED"; fi
+
+echo
+ echo "===== TTS SERVICE ====="
 systemctl --no-pager --full status tts-service.service --lines=5 || true
 
 echo
-
-echo "===== POSTGRES DATABASES ====="
-docker exec postgres psql -U admin -d postgres -c '\l' || true
-
-echo
-
-echo "===== n8n HEALTH ====="
-if curl -fsS http://127.0.0.1:5678/healthz >/dev/null 2>&1; then
-    echo "n8n health: OK"
-else
-    echo "n8n health: endpoint not responding on 127.0.0.1:5678"
-fi
+ echo "===== n8n ====="
+if curl -fsS http://127.0.0.1:5678/healthz >/dev/null 2>&1; then echo "n8n /healthz: OK"; else echo "n8n /healthz: not responding"; fi
 
 echo
  echo "============================================================"
-echo " RESTORE SELESAI"
+echo " RESTORE FINISHED"
 echo "============================================================"
-echo
- echo "Backup source: $BACKUP_DIR"
+echo "Backup: $BACKUP_DIR"
 echo
  echo "IMPORTANT:"
-echo "1. Verify n8n login/workflows."
-echo "2. Verify NPM Proxy Hosts + SSL."
-echo "3. Verify Render Service /health on port 5006."
-echo "4. Verify TTS Service on its configured port."
-echo "5. Verify UFW/SSH manually before closing the current SSH session."
-echo
-SCRIPT
+echo "- Verify n8n login and workflows."
+echo "- Verify NPM Proxy Hosts and SSL."
+echo "- Verify Render/TTS logs."
+echo "- Verify SSH before closing this session."
