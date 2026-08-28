@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # VPS FULL BACKUP
-# Backup name: vps-backup-YYYY-MM-DD HH.MM-FRUIT
+# Backup name: vps-backup-YYYY-MM-DD-HH.MM-FRUIT
 # Keeps only the 2 newest backups.
 # Can be run from any working directory.
 
@@ -16,17 +16,18 @@ Usage:
   sudo backup-vps --help
 
 Creates a VPS recovery backup under /opt/backup/vps using:
-  vps-backup-YYYY-MM-DD HH.MM-FRUIT
+  vps-backup-YYYY-MM-DD-HH.MM-FRUIT
 
 Only the 2 newest vps-backup-* directories are retained.
 Timezone: Asia/Jakarta (WIB).
+No spaces are used in backup names.
 USAGE
   exit 0
 fi
 
 FRUITS=("JERUK" "MANGGA" "DURIAN" "SALAK" "RAMBUTAN" "MANGGIS" "PISANG" "PEPAYA" "NANAS" "SEMANGKA" "JAMBU" "SIRSAK" "NANGKA" "BELIMBING" "ALPUKAT" "KELAPA" "DUKU" "LANGSAT" "MARKISA" "APEL")
 
-TIMESTAMP="$(date '+%Y-%m-%d %H.%M')"
+TIMESTAMP="$(date '+%Y-%m-%d-%H.%M')"
 FRUIT="${FRUITS[$((RANDOM % ${#FRUITS[@]}))]}"
 BACKUP_NAME="vps-backup-${TIMESTAMP}-${FRUIT}"
 BACKUP_DIR="${BACKUP_ROOT}/${BACKUP_NAME}"
