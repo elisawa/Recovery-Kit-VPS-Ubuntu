@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="${SCRIPT_DIR}/backup-vps.sh"
+
+usage() {
+    cat <<'USAGE'
+Usage:
+  backup-vps
+  backup-vps --help
+
+Creates a VPS recovery backup under:
+  /opt/backup/vps/
+
+Backup names:
+  vps-backup-YYYY-MM-DD HH.MM-FRUIT
+
+Retention:
+  Only the 2 newest vps-backup-* directories are kept.
+
+The command can be run from any working directory.
+USAGE
+}
+
+case "${1:-}" in
+    "") exec "$SCRIPT" ;;
+    --help|-h) usage ;;
+    *) echo "ERROR: unknown option: $1" >&2; usage >&2; exit 2 ;;
+esac
