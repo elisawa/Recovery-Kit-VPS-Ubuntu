@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# VPS Recovery Kit - Restore v8
+# VPS Recovery Kit - Restore v9
 # Safe by default: --dry-run changes nothing.
 # SSH is never restored automatically.
 
@@ -97,7 +97,7 @@ ARCHIVES=(
 )
 
 echo "============================================================"
-echo " VPS FULL RESTORE v8"
+echo " VPS FULL RESTORE v9"
 echo "============================================================"
 echo "Backup: $BACKUP_DIR"
 echo
@@ -124,17 +124,39 @@ echo
 echo "Checksum verification: OK"
 
 echo
-echo "Checking Docker image availability..."
+echo "Checking Docker image digests..."
+IMAGE_CHECK_FAILED=0
 if docker info >/dev/null 2>&1 && [[ -f "$BACKUP_DIR/manifest/docker-images.txt" ]]; then
-  awk '$1 !~ /^(REPOSITORY|=====|$)/ && $1 !~ /^\// && $3 ~ /^sha256:/ {print $1 ":" $2}' "$BACKUP_DIR/manifest/docker-images.txt" | while read -r image; do
-    if docker image inspect "$image" >/dev/null 2>&1; then
-      echo "  PRESENT: $image"
-    else
+  while read -r image expected_digest; do
+    [[ -n "$image" && -n "$expected_digest" ]] || continue
+    if ! docker image inspect "$image" >/dev/null 2>&1; then
       echo "  MISSING: $image"
+      IMAGE_CHECK_FAILED=1
+      continue
     fi
-  done
+
+    live_ref="$(docker image inspect "$image" --format '{{index .RepoDigests 0}}' 2>/dev/null || true)"
+    live_digest="${live_ref##*@}"
+
+    if [[ -z "$live_ref" || "$live_ref" == "$live_digest" ]]; then
+      echo "  UNKNOWN: $image (no RepoDigest available)"
+      IMAGE_CHECK_FAILED=1
+    elif [[ "$live_digest" == "$expected_digest" ]]; then
+      echo "  MATCH:   $image"
+    else
+      echo "  MISMATCH: $image"
+      echo "    expected: $expected_digest"
+      echo "    present : $live_digest"
+      IMAGE_CHECK_FAILED=1
+    fi
+  done < <(awk '$1 !~ /^(REPOSITORY|=====|$)/ && $1 !~ /^\// && $3 ~ /^sha256:/ {print $1 ":" $2, $3}' "$BACKUP_DIR/manifest/docker-images.txt")
 else
   echo "  Docker daemon or image manifest unavailable."
+  IMAGE_CHECK_FAILED=1
+fi
+
+if [[ "$IMAGE_CHECK_FAILED" -ne 0 ]]; then
+  error "Docker image digest verification failed."
 fi
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -145,6 +167,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "Backup structure: OK"
   echo "Archives: OK"
   echo "SHA-256: OK"
+  echo "Docker image digests: OK"
   echo "No files, containers, databases, services, or firewall rules were changed."
   exit 0
 fi
@@ -253,9 +276,6 @@ echo "[6/10] Restoring PostgreSQL..."
 compose_up /opt/stacks/postgres/compose.yaml
 wait_postgres
 
-# globals.sql contains roles and global objects. It may report benign conflicts
-# when restoring onto an already initialized PostgreSQL cluster, but failures
-# other than known duplicate-role/database cases must stop the restore.
 GLOBALS_LOG="$SAFETY/globals-restore.log"
 if ! docker exec -i postgres psql -v ON_ERROR_STOP=1 -U admin -d postgres < "$BACKUP_DIR/postgres/globals.sql" >"$GLOBALS_LOG" 2>&1; then
   if ! grep -Eq 'already exists|role .* already exists|database .* already exists' "$GLOBALS_LOG"; then
