@@ -7,8 +7,44 @@ set -Eeuo pipefail
 # ============================================================
 
 BACKUP_ROOT="/opt/backup/vps"
-DATE="$(date '+%Y-%m-%d-%H%M%S')"
-BACKUP_DIR="${BACKUP_ROOT}/${DATE}"
+TIMESTAMP="$(date '+%Y-%m-%d %H.%M')"
+
+# Nama buah Indonesia agar backup mudah dikenali secara manusia.
+FRUITS=(
+    "JERUK"
+    "MANGGA"
+    "PISANG"
+    "APEL"
+    "PEPAYA"
+    "NANAS"
+    "SEMANGKA"
+    "MELON"
+    "JAMBU"
+    "SALAK"
+    "RAMBUTAN"
+    "DURIAN"
+    "MANGGIS"
+    "SIRSAK"
+    "NANGKA"
+    "BELIMBING"
+    "DELIMA"
+    "ALPUKAT"
+    "LECI"
+    "KELENGKENG"
+)
+
+FRUIT="${FRUITS[$RANDOM % ${#FRUITS[@]}]}"
+BACKUP_NAME="vps-backup-${TIMESTAMP}-${FRUIT}"
+BACKUP_DIR="${BACKUP_ROOT}/${BACKUP_NAME}"
+
+# Hindari collision bila dua backup dibuat pada menit yang sama.
+if [[ -e "$BACKUP_DIR" ]]; then
+    n=2
+    while [[ -e "${BACKUP_DIR}-${n}" ]]; do
+        ((n++))
+    done
+    BACKUP_DIR="${BACKUP_DIR}-${n}"
+fi
 
 echo "============================================================"
 echo " VPS FULL BACKUP"
@@ -25,7 +61,8 @@ mkdir -p "$BACKUP_DIR"/{manifest,docker,postgres,services,system}
 
 echo "[1/10] Membuat manifest sistem..."
 {
-    echo "BACKUP_DATE=${DATE}"
+    echo "BACKUP_NAME=${BACKUP_NAME}"
+    echo "BACKUP_DATE=$(date -Is)"
     echo "HOSTNAME=$(hostname)"
     echo
     echo "===== OS ====="
@@ -69,6 +106,7 @@ rm -rf "$BACKUP_DIR/docker/compose/stacks/cloudbeaver/data"
 rm -rf "$BACKUP_DIR/docker/compose/stacks/uptime-kuma/data"
 rm -rf "$BACKUP_DIR/docker/compose/npm/data"
 rm -rf "$BACKUP_DIR/docker/compose/npm/letsencrypt"
+rm -rf "$BACKUP_DIR/docker/compose/stacks/dockge/data"
 rm -rf "$BACKUP_DIR/docker/compose/dockge/data"
 
 echo "[3/10] Backup data Docker..."
@@ -178,9 +216,10 @@ echo "[10/10] Membuat checksum..."
     echo "============================================================"
     echo "VPS RECOVERY BACKUP"
     echo "============================================================"
-    echo "Created : $(date -Is)"
-    echo "Host    : $(hostname)"
-    echo "Backup  : $BACKUP_DIR"
+    echo "Backup Name: ${BACKUP_NAME}"
+    echo "Created     : $(date -Is)"
+    echo "Host        : $(hostname)"
+    echo "Backup      : $BACKUP_DIR"
     echo
     echo "===== BACKUP SIZE ====="
     du -sh "$BACKUP_DIR"
