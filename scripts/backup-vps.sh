@@ -4,40 +4,25 @@ set -Eeuo pipefail
 # ============================================================
 # VPS FULL BACKUP
 # Host: Content Factory / n8n / Render / TTS
+# Backup name: vps-backup-YYYY-MM-DD HH.MM-FRUIT
+# Keeps only the 2 newest backups.
+# Can be run from any working directory.
 # ============================================================
 
 BACKUP_ROOT="/opt/backup/vps"
-TIMESTAMP="$(date '+%Y-%m-%d %H.%M')"
-
-# Nama buah Indonesia agar backup mudah dikenali secara manusia.
 FRUITS=(
-    "JERUK"
-    "MANGGA"
-    "PISANG"
-    "APEL"
-    "PEPAYA"
-    "NANAS"
-    "SEMANGKA"
-    "MELON"
-    "JAMBU"
-    "SALAK"
-    "RAMBUTAN"
-    "DURIAN"
-    "MANGGIS"
-    "SIRSAK"
-    "NANGKA"
-    "BELIMBING"
-    "DELIMA"
-    "ALPUKAT"
-    "LECI"
-    "KELENGKENG"
+    "JERUK" "MANGGA" "DURIAN" "SALAK" "RAMBUTAN"
+    "MANGGIS" "PISANG" "PEPAYA" "NANAS" "SEMANGKA"
+    "JAMBU" "SIRSAK" "NANGKA" "BELIMBING" "ALPUKAT"
+    "KELAPA" "DUKU" "LANGSAT" "MARKISA" "APEL"
 )
 
-FRUIT="${FRUITS[$RANDOM % ${#FRUITS[@]}]}"
+TIMESTAMP="$(date '+%Y-%m-%d %H.%M')"
+FRUIT="${FRUITS[$((RANDOM % ${#FRUITS[@]}))]}"
 BACKUP_NAME="vps-backup-${TIMESTAMP}-${FRUIT}"
 BACKUP_DIR="${BACKUP_ROOT}/${BACKUP_NAME}"
 
-# Hindari collision bila dua backup dibuat pada menit yang sama.
+# Hindari overwrite bila backup dibuat pada menit yang sama.
 if [[ -e "$BACKUP_DIR" ]]; then
     n=2
     while [[ -e "${BACKUP_DIR}-${n}" ]]; do
@@ -46,18 +31,18 @@ if [[ -e "$BACKUP_DIR" ]]; then
     BACKUP_DIR="${BACKUP_DIR}-${n}"
 fi
 
-echo "============================================================"
-echo " VPS FULL BACKUP"
-echo "============================================================"
-echo "Backup : ${BACKUP_DIR}"
-echo
-
 if [[ $EUID -ne 0 ]]; then
     echo "ERROR: jalankan dengan sudo."
     exit 1
 fi
 
 mkdir -p "$BACKUP_DIR"/{manifest,docker,postgres,services,system}
+
+echo "============================================================"
+echo " VPS FULL BACKUP"
+echo "============================================================"
+echo "Backup : ${BACKUP_DIR}"
+echo
 
 echo "[1/10] Membuat manifest sistem..."
 {
@@ -104,9 +89,11 @@ rm -rf "$BACKUP_DIR/docker/compose/stacks/n8n/data"
 rm -rf "$BACKUP_DIR/docker/compose/stacks/postgres/data"
 rm -rf "$BACKUP_DIR/docker/compose/stacks/cloudbeaver/data"
 rm -rf "$BACKUP_DIR/docker/compose/stacks/uptime-kuma/data"
+rm -rf "$BACKUP_DIR/docker/compose/stacks/npm/data"
+rm -rf "$BACKUP_DIR/docker/compose/stacks/npm/letsencrypt"
+rm -rf "$BACKUP_DIR/docker/compose/stacks/dockge/data"
 rm -rf "$BACKUP_DIR/docker/compose/npm/data"
 rm -rf "$BACKUP_DIR/docker/compose/npm/letsencrypt"
-rm -rf "$BACKUP_DIR/docker/compose/stacks/dockge/data"
 rm -rf "$BACKUP_DIR/docker/compose/dockge/data"
 
 echo "[3/10] Backup data Docker..."
@@ -142,7 +129,7 @@ docker exec postgres psql -U admin -d postgres -c '\du' > "$BACKUP_DIR/postgres/
 echo "[6/10] Backup Render Service..."
 mkdir -p "$BACKUP_DIR/services/render-service"
 tar -czf "$BACKUP_DIR/services/render-service/render-service.tar.gz" --exclude='render.log' --exclude='__pycache__' -C /opt render-service
-sudo systemctl cat render-service.service > "$BACKUP_DIR/services/render-service/render-service.service"
+systemctl cat render-service.service > "$BACKUP_DIR/services/render-service/render-service.service"
 if [[ -x /opt/render-service/venv/bin/pip ]]; then
     /opt/render-service/venv/bin/pip freeze > "$BACKUP_DIR/services/render-service/requirements.freeze.txt" || true
 fi
@@ -150,7 +137,7 @@ fi
 echo "[7/10] Backup TTS Service..."
 mkdir -p "$BACKUP_DIR/services/tts-service"
 tar -czf "$BACKUP_DIR/services/tts-service/tts-service.tar.gz" --exclude='output' --exclude='__pycache__' -C /opt tts-service
-sudo systemctl cat tts-service.service > "$BACKUP_DIR/services/tts-service/tts-service.service"
+systemctl cat tts-service.service > "$BACKUP_DIR/services/tts-service/tts-service.service"
 if [[ -x /opt/tts-service/venv/bin/pip ]]; then
     /opt/tts-service/venv/bin/pip freeze > "$BACKUP_DIR/services/tts-service/requirements.freeze.txt" || true
 fi
@@ -251,3 +238,14 @@ echo
 echo "PENTING:"
 echo "Backup ini masih berada di VPS."
 echo "Salin backup ini ke STORAGE DI LUAR VPS."
+
+echo
+echo "[CLEANUP] Menyimpan hanya 2 backup terbaru..."
+mapfile -t OLD_BACKUPS < <(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'vps-backup-*' -printf '%T@ %p\n' | sort -nr | tail -n +3 | cut -d' ' -f2-)
+for old in "${OLD_BACKUPS[@]}"; do
+    [[ -n "$old" ]] || continue
+    echo "  Removing: $old"
+    rm -rf -- "$old"
+done
+
+echo "  Backup count: $(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'vps-backup-*' | wc -l)"
